@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Yüz Algılama: Fotoğraf ve Canlı Kamera</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f4f7f6;
+      display: flex;
+      justify-content: center;
+      padding: 30px 15px;
+      margin: 0;
+    }
+    .kutu {
+      background: white;
+      padding: 25px;
+      border-radius: 12px;
+      box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+      text-align: center;
+      max-width: 700px;
+      width: 100%;
+    }
+    h2 { margin-top: 0; color: #333; }
+    #durum {
+      color: #555;
+      font-weight: 500;
+      margin-bottom: 20px;
+      padding: 10px;
+      border-radius: 6px;
+      background: #eef2f5;
+    }
+    .buton-grubu {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+    }
+    .buton {
+      background-color: #0066ff;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 15px;
+      border: none;
+      transition: background 0.2s;
+    }
+    .buton:hover { background-color: #0052cc; }
+    .buton:disabled, .buton.pasif {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    .cevir-btn { background-color: #f59e0b; display: none; }
+    .cevir-btn:hover { background-color: #d97706; }
+    .indir-btn { background-color: #10b981; display: none; }
+    .indir-btn:hover { background-color: #059669; }
+    input[type="file"], video { display: none; }
+    canvas {
+      max-width: 100%;
+      height: auto;
+      margin-top: 20px;
+      border-radius: 8px;
+      display: none;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="kutu">
+    <h2>Yüz Algılama Stüdyosu</h2>
+    <p id="durum">⏳ Yapay zeka modeli hazırlanıyor, lütfen bekleyin...</p>
+
+    <div class="buton-grubu">
+      <label for="fotoInput" id="yukleLabel" class="buton pasif">📁 Fotoğraf Yükle</label>
+      <input type="file" id="fotoInput" accept="image/jpeg, image/png, image/webp" disabled>
+
+      <button id="kameraBtn" class="buton" disabled>📷 Canlı Kamera</button>
+      <button id="cevirBtn" class="buton cevir-btn">🔄 Arka / Ön Kamera</button>
+      <button id="indirBtn" class="buton indir-btn">💾 Kaydet (İndir)</button>
+    </div>
+
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <script type="module">
+    import { FaceDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    const fotoInput = document.getElementById('fotoInput');
+    const yukleLabel = document.getElementById('yukleLabel');
+    const kameraBtn = document.getElementById('kameraBtn');
+    const cevirBtn = document.getElementById('cevirBtn');
+    const indirBtn = document.getElementById('indirBtn');
+    const durum = document.getElementById('durum');
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    let vision;
+    let faceDetector;
+    let aktifMod = null;
+    let kameraStream = null;
+    let animasyonId = null;
+    let sonVideoZamani = -1;
+    let kameraYonu = 'environment';
+
+    // Titreme ve Yanlış Algılama (Hayalet Kare) Engelleme Değişkenleri
+    let oncekiKareler = [];
+    const yumusatmaOrani = 0.22;
+    let dogrulamaSayaci = 0; // Yüzün üst üste kaç kare göründüğünü sayar
+
+    // 1. Modeli Hazırla
+    async function modeliBaslat() {
+      try {
+        vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+        await dedektorAyarla("IMAGE");
+        durum.innerText = "✅ Hazır! Fotoğraf yükleyebilir veya kamerayı açabilirsiniz.";
+        fotoInput.disabled = false;
+        yukleLabel.classList.remove('pasif');
+        kameraBtn.disabled = false;
+      } catch (err) {
+        durum.innerText = "❌ Model yüklenemedi: " + err.message;
+      }
+    }
+
+    async function dedektorAyarla(mod) {
+      if (aktifMod === mod && faceDetector) return;
+      // Canlı videoda yanlış algılamayı önlemek için hassasiyet eşiği 0.75 (%75) yapıldı
+      const guvenEsigi = (mod === "VIDEO") ? 0.75 : 0.55;
+
+      if (faceDetector) {
+        await faceDetector.setOptions({ runningMode: mod, minDetectionConfidence: guvenEsigi });
+      } else {
+        faceDetector = await FaceDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+          },
+          runningMode: mod,
+          minDetectionConfidence: guvenEsigi
+        });
+      }
+      aktifMod = mod;
+    }
+
+    modeliBaslat();
+
+    function koseCiz(ctx, x, y, w, h) {
+      const koseUzunlugu = Math.min(w, h) * 0.25;
+      ctx.beginPath();
+      // Sol Üst
+      ctx.moveTo(x, y + koseUzunlugu);
+      ctx.lineTo(x, y);
+      ctx.lineTo(x + koseUzunlugu, y);
+      // Sağ Üst
+      ctx.moveTo(x + w - koseUzunlugu, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w, y + koseUzunlugu);
+      // Sağ Alt
+      ctx.moveTo(x + w, y + h - koseUzunlugu);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x + w - koseUzunlugu, y + h);
+      // Sol Alt
+      ctx.moveTo(x + koseUzunlugu, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.lineTo(x, y + h - koseUzunlugu);
+      ctx.stroke();
+    }
+
+    function kamerayiDurdur() {
+      if (animasyonId) cancelAnimationFrame(animasyonId);
+      if (kameraStream) {
+        kameraStream.getTracks().forEach(track => track.stop());
+        kameraStream = null;
+      }
+      cevirBtn.style.display = 'none';
+    }
+
+    // 2. Fotoğraf Yükleme İşlemi
+    fotoInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      kamerayiDurdur();
+      await dedektorAyarla("IMAGE");
+
+      durum.innerText = "🔍 Fotoğraf taranıyor...";
+      indirBtn.style.display = 'none';
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const maxBoyut = 1600;
+          let genislik = img.width;
+          let yukseklik = img.height;
+
+          if (genislik > maxBoyut || yukseklik > maxBoyut) {
+            if (genislik > yukseklik) {
+              yukseklik = Math.round((yukseklik * maxBoyut) / genislik);
+              genislik = maxBoyut;
+            } else {
+              genislik = Math.round((genislik * maxBoyut) / yukseklik);
+              yukseklik = maxBoyut;
+            }
+          }
+
+          canvas.width = genislik;
+          canvas.height = yukseklik;
+          canvas.style.display = 'inline-block';
+          ctx.drawImage(img, 0, 0, genislik, yukseklik);
+
+          const sonuc = faceDetector.detect(canvas);
+          const yuzler = sonuc.detections;
+
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(4, genislik / 180);
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+
+          yuzler.forEach(yuz => {
+            const { originX, originY, width, height } = yuz.boundingBox;
+            koseCiz(ctx, originX, originY, width, height);
+          });
+
+          if (yuzler.length > 0) {
+            durum.innerText = `🎯 Fotoğrafta ${yuzler.length} adet yüz bulundu!`;
+            indirBtn.style.display = 'inline-block';
+          } else {
+            durum.innerText = "⚠️ Fotoğrafta yüz algılanamadı.";
+          }
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    // 3. Canlı Kamera Başlatma İşlemi
+    async function kamerayiAc() {
+      kamerayiDurdur();
+      await dedektorAyarla("VIDEO");
+      oncekiKareler = [];
+      dogrulamaSayaci = 0;
+
+      try {
+        durum.innerText = "⏳ Kamera açılıyor...";
+        kameraStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: kameraYonu,
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          }
+        });
+        video.srcObject = kameraStream;
+
+        video.onloadeddata = () => {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          canvas.style.display = 'inline-block';
+          cevirBtn.style.display = 'inline-block';
+          indirBtn.style.display = 'inline-block';
+
+          const yonMetni = kameraYonu === 'environment' ? 'Arka Kamera' : 'Ön Kamera';
+          durum.innerText = `🟢 ${yonMetni} aktif! Canlı taranıyor...`;
+          canliTarama();
+        };
+      } catch (err) {
+        durum.innerText = "❌ Kamera açılamadı! İzin verdiğinizden emin olun.";
+      }
+    }
+
+    kameraBtn.addEventListener('click', kamerayiAc);
+
+    cevirBtn.addEventListener('click', () => {
+      kameraYonu = (kameraYonu === 'environment') ? 'user' : 'environment';
+      kamerayiAc();
+    });
+
+    // 4. Canlı Tarama (Hayalet Kare ve Titreme Engelleme)
+    function canliTarama() {
+      if (!kameraStream) return;
+
+      if (video.currentTime !== sonVideoZamani) {
+        sonVideoZamani = video.currentTime;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        const sonuc = faceDetector.detectForVideo(video, performance.now());
+        
+        // Çok küçük (arka plandaki alakasız) noktaları ve göze sahip olmayan şekilleri filtrele
+        const gecerliYuzler = sonuc.detections.filter(yuz => {
+          const { width, height } = yuz.boundingBox;
+          const yeterliBoyut = width > canvas.width * 0.08 && height > canvas.height * 0.08;
+          const gozBurunVarMi = yuz.keypoints && yuz.keypoints.length >= 4;
+          return yeterliBoyut && gozBurunVarMi;
+        });
+
+        // Ardışık doğrulama: Yüz en az 5 kare üst üste görünürse çizmeye başla
+        if (gecerliYuzler.length > 0) {
+          dogrulamaSayaci = Math.min(10, dogrulamaSayaci + 1);
+        } else {
+          dogrulamaSayaci = 0;
+          oncekiKareler = [];
+        }
+
+        if (dogrulamaSayaci >= 5) {
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(4, canvas.width / 160);
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+
+          const yeniKareler = [];
+
+          gecerliYuzler.forEach((yuz, i) => {
+            let { originX: x, originY: y, width: w, height: h } = yuz.boundingBox;
+
+            if (oncekiKareler[i]) {
+              const eski = oncekiKareler[i];
+              if (Math.abs(x - eski.x) < 3) x = eski.x;
+              if (Math.abs(y - eski.y) < 3) y = eski.y;
+              if (Math.abs(w - eski.w) < 3) w = eski.w;
+              if (Math.abs(h - eski.h) < 3) h = eski.h;
+
+              x = eski.x + (x - eski.x) * yumusatmaOrani;
+              y = eski.y + (y - eski.y) * yumusatmaOrani;
+              w = eski.w + (w - eski.w) * yumusatmaOrani;
+              h = eski.h + (h - eski.h) * yumusatmaOrani;
+            }
+
+            yeniKareler.push({ x, y, w, h });
+            koseCiz(ctx, x, y, w, h);
+          });
+
+          oncekiKareler = yeniKareler;
+        }
+      }
+      animasyonId = requestAnimationFrame(canliTarama);
+    }
+
+    // 5. Kaydet (İndir) Butonu
+    indirBtn.addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.download = 'yuz_yakalama.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    });
+  </script>
+
+</body>
+</html>
