@@ -105,12 +105,11 @@
     let kameraStream = null;
     let animasyonId = null;
     let sonVideoZamani = -1;
-    let kameraYonu = 'environment';
+    let kameraYonu = 'environment'; // 'environment' = Arka, 'user' = Ön
 
-    // Titreme ve Yanlış Algılama (Hayalet Kare) Engelleme Değişkenleri
     let oncekiKareler = [];
     const yumusatmaOrani = 0.22;
-    let dogrulamaSayaci = 0; // Yüzün üst üste kaç kare göründüğünü sayar
+    let dogrulamaSayaci = 0;
 
     // 1. Modeli Hazırla
     async function modeliBaslat() {
@@ -130,7 +129,6 @@
 
     async function dedektorAyarla(mod) {
       if (aktifMod === mod && faceDetector) return;
-      // Canlı videoda yanlış algılamayı önlemek için hassasiyet eşiği 0.75 (%75) yapıldı
       const guvenEsigi = (mod === "VIDEO") ? 0.75 : 0.55;
 
       if (faceDetector) {
@@ -252,7 +250,8 @@
           video: {
             facingMode: kameraYonu,
             width: { ideal: 640 },
-            height: { ideal: 480 }
+            height: { ideal: 480 },
+            zoom: { ideal: 1.0 } // Geniş açı / perspektif bozulmasını önler
           }
         });
         video.srcObject = kameraStream;
@@ -264,7 +263,7 @@
           cevirBtn.style.display = 'inline-block';
           indirBtn.style.display = 'inline-block';
 
-          const yonMetni = kameraYonu === 'environment' ? 'Arka Kamera' : 'Ön Kamera';
+          const yonMetni = kameraYonu === 'environment' ? 'Arka Kamera' : 'Ön Kamera (Ayna Modu)';
           durum.innerText = `🟢 ${yonMetni} aktif! Canlı taranıyor...`;
           canliTarama();
         };
@@ -280,17 +279,26 @@
       kamerayiAc();
     });
 
-    // 4. Canlı Tarama (Hayalet Kare ve Titreme Engelleme)
+    // 4. Canlı Tarama
     function canliTarama() {
       if (!kameraStream) return;
 
       if (video.currentTime !== sonVideoZamani) {
         sonVideoZamani = video.currentTime;
+
+        const onKameraMi = (kameraYonu === 'user');
+
+        // Ön kameradaysa görüntüyü ayna gibi yatay çevir (tersliği ve perspektif hissini düzeltir)
+        ctx.save();
+        if (onKameraMi) {
+          ctx.translate(canvas.width, 0);
+          ctx.scale(-1, 1);
+        }
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
 
         const sonuc = faceDetector.detectForVideo(video, performance.now());
         
-        // Çok küçük (arka plandaki alakasız) noktaları ve göze sahip olmayan şekilleri filtrele
         const gecerliYuzler = sonuc.detections.filter(yuz => {
           const { width, height } = yuz.boundingBox;
           const yeterliBoyut = width > canvas.width * 0.08 && height > canvas.height * 0.08;
@@ -298,7 +306,6 @@
           return yeterliBoyut && gozBurunVarMi;
         });
 
-        // Ardışık doğrulama: Yüz en az 5 kare üst üste görünürse çizmeye başla
         if (gecerliYuzler.length > 0) {
           dogrulamaSayaci = Math.min(10, dogrulamaSayaci + 1);
         } else {
@@ -316,6 +323,11 @@
 
           gecerliYuzler.forEach((yuz, i) => {
             let { originX: x, originY: y, width: w, height: h } = yuz.boundingBox;
+
+            // Ön kamerada görüntü aynalandığı için karenin X koordinatını da tam simetrik çeviriyoruz
+            if (onKameraMi) {
+              x = canvas.width - x - w;
+            }
 
             if (oncekiKareler[i]) {
               const eski = oncekiKareler[i];
